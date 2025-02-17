@@ -16,55 +16,91 @@ from io import BytesIO
 import multiprocessing as mp
 from utils import load_features
 
+import certifi
+import urllib3
+
+http = urllib3.PoolManager(
+    cert_reqs="CERT_REQUIRED",
+    ca_certs=certifi.where()
+)
+
+user_agents = [
+    'Mozilla/5.0 (Windows; U; Windows NT 5.1; it; rv:1.8.1.11)',
+    'Gecko/20071127 Firefox/2.0.0.11',
+    'Opera/9.25 (Windows NT 5.1; U; en)',
+    'Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1; .NET CLR 1.1.4322; .NET CLR 2.0.50727)',
+    'Mozilla/5.0 (compatible; Konqueror/3.5; Linux) KHTML/3.5.5 (like Gecko) (Kubuntu)',
+    'Mozilla/5.0 (Windows NT 5.1) AppleWebKit/535.19 (KHTML, like Gecko) Chrome/18.0.1025.142 Safari/535.19',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.7; rv:11.0) Gecko/20100101 Firefox/11.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.6; rv:8.0.1) Gecko/20100101 Firefox/8.0.1',
+    'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/535.19 (KHTML, like Gecko) Chrome/18.0.1025.151 Safari/535.19'
+]
+
 def save_image(url, name):
     
     try:
-        response = requests.get(url, verify=False, timeout=20)
+        # perform try catch iterating over user_agents
+        for user_agent in user_agents:
+            response = requests.get(url, headers={'User-Agent': user_agent})
+            print(response.status_code)
+            if response.status_code == 200:
+                img = Image.open(BytesIO(response.content))
+
+                width, height = img.size
+
+                if 2400 > width > 1200 or 2400 > height > 1200:
+                    img = img.resize((width//2, height//2))
+
+                if width > 2400 or height > 2400:
+                    img = img.resize((width//4, height//4))
+                
+                if not img.mode == 'RGB':
+                    img = img.convert('RGB')
+                
+                img.save("image-text-verification/VERITE/images/" + name + ".jpg")
+                return True
         
-        if response.status_code == 200:
-
-            img = Image.open(BytesIO(response.content))
-
-            width, height = img.size
-
-            if 2400 > width > 1200 or 2400 > height > 1200:
-                img = img.resize((width//2, height//2))
-
-            if width > 2400 or height > 2400:
-                img = img.resize((width//4, height//4))
-            
-            if not img.mode == 'RGB':
-                img = img.convert('RGB')
-            
-            img.save("VERITE/images/" + name + ".jpg")
+        return False
             
     except Exception as e: 
         print(e, "!!!", url)
+        return False
         
 
         
 def prepare_verite(download_images=True):
     
-    verite = pd.read_csv('VERITE/VERITE_articles.csv', index_col=0)
+    verite = pd.read_csv('image-text-verification/VERITE/VERITE_articles.csv', index_col=0)
+    failed_images = []
 
     if download_images:
         
         print("Scrape images!")
         
-        directory = 'VERITE/images'
+        directory = 'image-text-verification/VERITE/images'
         if not os.path.exists(directory):
             os.makedirs(directory)
 
-        # Scrape images
+        # Scrape images, if not exists, else skip
         for (i, row) in tqdm(verite.iterrows(), total=verite.shape[0]):
             idx = row.id
             t_url = row.true_url
             f_url = row.false_url
-
-            save_image(t_url, "true_"+str(idx))
+            # check if the image exists
+            if not os.path.exists(directory + "/true_" + str(idx) + ".jpg"):
+                print("True URL: ", t_url, "for index: ", idx)
+                if(save_image(t_url, "true_"+str(idx))):
+                    print("True image saved for index: ", idx)
+                else:
+                    failed_images.append(t_url)
 
             if f_url:
-                save_image(f_url, "false_"+str(idx))
+                if not os.path.exists(directory + "/false_" + str(idx) + ".jpg"):
+                    print("False URL: ", f_url, "for index: ", idx)
+                    if(save_image(f_url, "false_"+str(idx))):
+                        print("False image saved for index: ", idx)
+                    else:
+                        failed_images.append(f_url)
         
     # From: true-caption, false-caption, true-image-url, false-image-url, article-url
     # Change to -> caption, image_path, label
@@ -78,30 +114,34 @@ def prepare_verite(download_images=True):
         true_caption = row.true_caption
         false_caption = row.false_caption 
         true_img_path = 'images/true_' + str(idx) + '.jpg'
-
-        unpack_data.append({
-            'caption': true_caption,
-            'image_path': true_img_path,
-            'label': 'true'
-        })
-
-        unpack_data.append({
-            'caption': false_caption,
-            'image_path': true_img_path,
-            'label': 'miscaptioned'
-        })  
-
-        if row.false_url:
-            false_img_path = 'images/false_' + str(idx) + '.jpg'    
-
+        true_url = row.true_url
+        
+        if true_url not in failed_images:
             unpack_data.append({
                 'caption': true_caption,
-                'image_path': false_img_path,
-                'label': 'out-of-context'
-            })        
+                'image_path': true_img_path,
+                'label': 'true'
+            })
+
+            unpack_data.append({
+                'caption': false_caption,
+                'image_path': true_img_path,
+                'label': 'miscaptioned'
+            })
+
+        if row.false_url:
+            false_img_path = 'images/false_' + str(idx) + '.jpg'
+            false_url = row.false_url
+
+            if false_url not in failed_images:
+                unpack_data.append({
+                    'caption': true_caption,
+                    'image_path': false_img_path,
+                    'label': 'out-of-context'
+                })        
 
     verite_df = pd.DataFrame(unpack_data)
-    verite_df.to_csv('VERITE/VERITE.csv')
+    verite_df.to_csv('image-text-verification/VERITE/VERITE.csv')
 
 def load_split_VisualNews(clip_version="ViT-L/14", load_features=True):
     
